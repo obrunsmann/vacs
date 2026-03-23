@@ -7,6 +7,7 @@ mod error;
 mod keybinds;
 mod platform;
 mod radio;
+mod remote;
 mod secrets;
 mod signaling;
 
@@ -21,6 +22,7 @@ use crate::config::{CLIENT_SETTINGS_FILE_NAME, Persistable, PersistedClientConfi
 use crate::error::{StartupError, StartupErrorExt};
 use crate::keybinds::engine::KeybindEngineHandle;
 use crate::platform::Capabilities;
+use crate::remote::{RemoteServer, RemoteServerHandle};
 use tauri::{App, Manager, RunEvent, WindowEvent};
 use tauri_plugin_deep_link::DeepLinkExt;
 use tokio::sync::Mutex as TokioMutex;
@@ -87,6 +89,7 @@ pub fn run() {
                 let transmit_config = state.config.client.transmit_config.clone();
                 let call_control_config = state.config.client.keybinds.clone();
                 let keybind_engine = state.keybind_engine_handle();
+                let remote_config = state.config.client.remote.clone();
 
                 app.manage::<HttpState>(HttpState::new(app.handle())?);
                 app.manage::<AudioManagerHandle>(state.audio_manager_handle());
@@ -104,6 +107,14 @@ pub fn run() {
                 }
 
                 app.manage::<KeybindEngineHandle>(keybind_engine);
+
+                let mut remote_handle = RemoteServer::new(app.handle().clone());
+                if remote_config.enabled {
+                    remote_handle.start(remote_config.listen_addr, remote_config.serve_frontend);
+                } else {
+                    log::info!("Remote control server is disabled");
+                }
+                app.manage::<RemoteServerHandle>(TokioMutex::new(remote_handle));
 
                 Ok(())
             }
@@ -123,6 +134,7 @@ pub fn run() {
             app::commands::app_frontend_ready,
             app::commands::app_get_call_config,
             app::commands::app_get_client_page_settings,
+            app::commands::app_get_version,
             app::commands::app_load_extra_client_page_config,
             app::commands::app_load_test_profile,
             app::commands::app_open_folder,
@@ -133,6 +145,7 @@ pub fn run() {
             app::commands::app_set_call_config,
             app::commands::app_set_fullscreen,
             app::commands::app_set_selected_client_page_config,
+            app::commands::app_change_zoom_level,
             app::commands::app_unload_test_profile,
             app::commands::app_update,
             audio::commands::audio_get_devices,
@@ -167,6 +180,10 @@ pub fn run() {
             signaling::commands::signaling_remove_ignored_client,
             signaling::commands::signaling_start_call,
             signaling::commands::signaling_terminate,
+            remote::commands::remote_broadcast_store_sync,
+            remote::commands::remote_get_config,
+            remote::commands::remote_is_enabled,
+            remote::commands::remote_set_config,
         ])
         .build(tauri::generate_context!())
         .expect("Failed to build tauri application")
@@ -196,6 +213,12 @@ pub fn run() {
                     }
 
                     app_handle.state::<KeybindEngineHandle>().write().await.shutdown();
+
+                    app_handle
+                        .state::<TokioMutex<RemoteServer>>()
+                        .lock()
+                        .await
+                        .stop();
 
                     app_handle.state::<AppState>().lock().await.shutdown();
                 });
