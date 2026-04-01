@@ -16,7 +16,7 @@ use crate::app::state::audio::AppStateAudioExt;
 use crate::app::state::http::HttpState;
 use crate::app::state::keybinds::AppStateKeybindsExt;
 use crate::app::state::{AppState, AppStateInner};
-use crate::audio::manager::AudioManagerHandle;
+use crate::audio::manager::{AudioBackendHandle, AudioManagerHandle};
 use crate::build::VersionInfo;
 use crate::config::{CLIENT_SETTINGS_FILE_NAME, Persistable, PersistedClientConfig};
 use crate::error::{StartupError, StartupErrorExt};
@@ -92,6 +92,7 @@ pub fn run() {
                 let remote_config = state.config.client.remote.clone();
 
                 app.manage::<HttpState>(HttpState::new(app.handle())?);
+                app.manage::<AudioBackendHandle>(state.audio_backend_handle());
                 app.manage::<AudioManagerHandle>(state.audio_manager_handle());
                 app.manage::<AppState>(TokioMutex::new(state));
 

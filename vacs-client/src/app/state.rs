@@ -7,7 +7,7 @@ pub(crate) mod webrtc;
 
 use crate::app::state::signaling::{AppStateSignalingExt, ConnectionState};
 use crate::app::state::webrtc::{Call, UnansweredCallGuard};
-use crate::audio::manager::{AudioManager, AudioManagerHandle};
+use crate::audio::manager::{AudioBackendHandle, AudioManager, AudioManagerHandle};
 use crate::config::AppConfig;
 use crate::error::{StartupError, StartupErrorExt};
 use crate::keybinds::engine::{KeybindEngine, KeybindEngineHandle};
@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
 use tokio_util::sync::CancellationToken;
+use vacs_audio::backend::cpal::CpalBackend;
 use vacs_signaling::client::SignalingClient;
 use vacs_signaling::protocol::vatsim::{ClientId, StationId};
 use vacs_signaling::protocol::ws::server;
@@ -30,6 +31,7 @@ pub struct AppStateInner {
     pub config: AppConfig,
     shutdown_token: CancellationToken,
     signaling_client: SignalingClient<TokioTransport, TauriTokenProvider>,
+    audio_backend: AudioBackendHandle,
     audio_manager: AudioManagerHandle,
     keybind_engine: KeybindEngineHandle,
     active_call: Option<Call>,
@@ -58,6 +60,8 @@ impl AppStateInner {
         let config = AppConfig::parse(&config_dir).map_startup_err(StartupError::Config)?;
         let shutdown_token = CancellationToken::new();
 
+        let audio_backend: AudioBackendHandle = Arc::new(CpalBackend);
+
         Ok(Self {
             config: config.clone(),
             signaling_client: Self::new_signaling_client(
@@ -66,8 +70,9 @@ impl AppStateInner {
                 shutdown_token.child_token(),
                 config.client.max_signaling_reconnect_attempts(),
             ),
+            audio_backend: audio_backend.clone(),
             audio_manager: Arc::new(RwLock::new(
-                AudioManager::new(app.clone(), &config.audio)
+                AudioManager::new(audio_backend, app.clone(), &config.audio)
                     .map_startup_err(StartupError::Audio)?,
             )),
             keybind_engine: Arc::new(TokioRwLock::new(KeybindEngine::new(
