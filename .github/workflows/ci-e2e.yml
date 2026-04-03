@@ -1,0 +1,112 @@
+name: CI • E2E
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  e2e:
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: vacs-client
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-22.04, windows-latest]
+
+    # Service containers are only supported on Linux runners and silently ignored on Windows
+    services:
+      valkey:
+        image: valkey/valkey:9-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+            libssl-dev libasound2-dev libgtk-3-dev libopus-dev \
+            cmake patchelf xvfb webkit2gtk-driver
+
+      - name: Install Memurai (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          choco install memurai-developer -y --no-progress
+          $deadline = (Get-Date).AddSeconds(30)
+          while ((Get-Date) -lt $deadline) {
+            try {
+              $tcp = New-Object System.Net.Sockets.TcpClient("127.0.0.1", 6379)
+              $tcp.Close()
+              Write-Host "Memurai is ready on port 6379"
+              exit 0
+            } catch {
+              Start-Sleep -Milliseconds 500
+            }
+          }
+          throw "Memurai did not become available within 30s"
+
+      - name: Install Edge WebDriver (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $edgeVersion = (Get-Item "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe").VersionInfo.FileVersion
+          $driverUrl = "https://msedgedriver.azureedge.net/$edgeVersion/edgedriver_win64.zip"
+          Invoke-WebRequest -Uri $driverUrl -OutFile edgedriver.zip
+          Expand-Archive -Path edgedriver.zip -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
+          Remove-Item edgedriver.zip
+
+      - name: Setup Node (LTS)
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "lts/*"
+          cache: "npm"
+          cache-dependency-path: vacs-client/package-lock.json
+
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: e2e-${{ matrix.platform }}
+
+      - name: Install tauri-driver and vatsim-mock
+        run: |
+          cargo install tauri-driver --locked
+          # Switch to crates.io version of vatsim-api once the crate is published - install from git until then
+          cargo install --git https://github.com/MorpheusXAUT/vatsim-api --features mock-bin --bin vatsim-mock --locked
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: E2E tests (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: xvfb-run npm test -w e2e
+
+      - name: E2E tests (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: npm test -w e2e
+
+      - name: Summary
+        shell: bash
+        run: echo "### ✅ E2E tests passed (${{ matrix.platform }})" >> "$GITHUB_STEP_SUMMARY"
