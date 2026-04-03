@@ -164,6 +164,8 @@ pub fn run() {
             auth::commands::auth_check_session,
             auth::commands::auth_logout,
             auth::commands::auth_open_oauth_url,
+            #[cfg(feature = "e2e")]
+            auth::commands::auth_login_test,
             keybinds::commands::keybinds_get_external_binding,
             keybinds::commands::keybinds_get_keybinds_config,
             keybinds::commands::keybinds_get_radio_config,
