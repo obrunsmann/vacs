@@ -56,7 +56,7 @@ pub fn run() {
                 return Err(anyhow::anyhow!("Failed to install rustls crypto provider").into());
             }
 
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", not(feature = "e2e")))]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
 
