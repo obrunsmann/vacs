@@ -109,12 +109,14 @@ jobs:
         if: matrix.platform == 'ubuntu-22.04'
         run: xvfb-run npm test -w e2e
         env:
+          RUST_BACKTRACE: "1"
           VACS_DATA_DIR: ${{ github.workspace }}/vacs-data
 
       - name: E2E tests (Windows)
         if: matrix.platform == 'windows-latest'
         run: npm test -w e2e
         env:
+          RUST_BACKTRACE: "1"
           VACS_DATA_DIR: ${{ github.workspace }}/vacs-data
 
       - name: Summary

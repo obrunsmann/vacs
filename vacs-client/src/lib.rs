@@ -24,7 +24,6 @@ use crate::keybinds::engine::KeybindEngineHandle;
 use crate::platform::Capabilities;
 use crate::remote::{RemoteServer, RemoteServerHandle};
 use tauri::{App, Manager, RunEvent, WindowEvent};
-use tauri_plugin_deep_link::DeepLinkExt;
 use tokio::sync::Mutex as TokioMutex;
 
 pub fn run() {
@@ -63,6 +62,8 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             {
+                use tauri_plugin_deep_link::DeepLinkExt;
+
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
                     if let Some(url) = event.urls().first() {
@@ -72,9 +73,10 @@ pub fn run() {
             }
 
             async fn setup(app: &mut App) -> Result<(), StartupError> {
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(any(target_os = "macos", feature = "e2e")))]
                 {
                     use anyhow::Context;
+                    use tauri_plugin_deep_link::DeepLinkExt;
 
                     app.deep_link()
                         .register_all()
