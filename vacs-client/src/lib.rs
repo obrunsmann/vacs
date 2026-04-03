@@ -27,7 +27,8 @@ use tauri::{App, Manager, RunEvent, WindowEvent};
 use tokio::sync::Mutex as TokioMutex;
 
 pub fn run() {
-    tauri::Builder::default()
+    #[cfg_attr(feature = "e2e", allow(unused_mut))]
+    let mut builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
                 .max_file_size(1_000_000)
@@ -42,11 +43,6 @@ pub fn run() {
                 .level_for("trackaudio", log::LevelFilter::Trace)
                 .build(),
         )
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _| {
-            if let Some(url) = argv.get(1) {
-                app::handle_deep_link(app.clone(), url.to_string());
-            }
-        }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::default().build())
@@ -191,8 +187,18 @@ pub fn run() {
             remote::commands::remote_get_config,
             remote::commands::remote_is_enabled,
             remote::commands::remote_set_config,
-        ])
-        .build(tauri::generate_context!())
+        ]);
+
+    #[cfg(not(feature = "e2e"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _| {
+            if let Some(url) = argv.get(1) {
+                app::handle_deep_link(app.clone(), url.to_string());
+            }
+        }));
+    }
+
+    builder.build(tauri::generate_context!())
         .expect("Failed to build tauri application")
         .run(move |app_handle, event| {
             if let RunEvent::WindowEvent {event: WindowEvent::CloseRequested {..}, ..} = event {
