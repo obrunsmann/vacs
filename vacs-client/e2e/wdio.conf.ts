@@ -8,32 +8,47 @@ const VACS_ROOT = path.resolve(__dirname, "..", "..");
 const VACS_CLIENT_ROOT = path.resolve(VACS_ROOT, "vacs-client");
 const VACS_DATA_DIR = process.env.VACS_DATA_DIR || path.resolve(VACS_ROOT, "..", "vacs-data");
 
-const isWindows = process.platform === "win32";
-const binaryExt = isWindows ? ".exe" : "";
+const IS_WINDOWS = process.platform === "win32";
+const BINARY_EXT = IS_WINDOWS ? ".exe" : "";
+const APP_BINARY = path.resolve(VACS_ROOT, "target", "debug", `vacs-client${BINARY_EXT}`);
 
 const MOCK_VATSIM_PORT = 4567;
 const VACS_SERVER_PORT = 4568;
+const TAURI_DRIVER_PORT_A = 4444;
+const TAURI_DRIVER_NATIVE_PORT_A = 4544;
+const TAURI_DRIVER_PORT_B = 4445;
+const TAURI_DRIVER_NATIVE_PORT_B = 4545;
 
 // keep track of child processes for cleanup
-let tauriDriver: ChildProcess | undefined;
+let tauriDriverA: ChildProcess | undefined;
+let tauriDriverB: ChildProcess | undefined;
 let mockVatsimServer: ChildProcess | undefined;
 let vacsServer: ChildProcess | undefined;
 let exit = false;
 
-export const config: WebdriverIO.Config = {
+export const config: WebdriverIO.MultiremoteConfig = {
     hostname: "127.0.0.1",
-    port: 4444,
     specs: ["./specs/**/*.ts"],
     maxInstances: 1,
-    capabilities: [
+    capabilities: {
         // See https://tauri.app/develop/tests/webdriver/example/webdriverio/#config
-        {
-            maxInstances: 1,
-            "tauri:options": {
-                application: path.resolve(VACS_ROOT, "target", "debug", `vacs-client${binaryExt}`),
+        clientA: {
+            port: TAURI_DRIVER_PORT_A,
+            capabilities: {
+                "tauri:options": {
+                    application: APP_BINARY,
+                },
             },
-        } as WebdriverIO.Capabilities,
-    ],
+        },
+        clientB: {
+            port: TAURI_DRIVER_PORT_B,
+            capabilities: {
+                "tauri:options": {
+                    application: APP_BINARY,
+                },
+            },
+        },
+    },
     reporters: ["spec"],
     framework: "mocha",
     mochaOpts: {
@@ -87,7 +102,7 @@ export const config: WebdriverIO.Config = {
                   process.env.VATSIM_API_ROOT,
                   "target",
                   "debug",
-                  `vatsim-mock${binaryExt}`,
+                  `vatsim-mock${BINARY_EXT}`,
               )
             : findBinary("vatsim-mock");
         const seedPath = path.resolve(__dirname, "seed.json");
@@ -112,7 +127,7 @@ export const config: WebdriverIO.Config = {
         await waitForPort(MOCK_VATSIM_PORT, 10_000);
         console.log(`vatsim-mock listening on port ${MOCK_VATSIM_PORT}`);
 
-        const serverBin = path.resolve(VACS_ROOT, "target", "debug", `vacs-server${binaryExt}`);
+        const serverBin = path.resolve(VACS_ROOT, "target", "debug", `vacs-server${BINARY_EXT}`);
         vacsServer = spawn(serverBin, [], {
             cwd: VACS_ROOT,
             stdio: ["ignore", process.stdout, process.stderr],
@@ -146,21 +161,53 @@ export const config: WebdriverIO.Config = {
         await waitForPort(VACS_SERVER_PORT, 15_000);
         console.log(`vacs-server listening on port ${VACS_SERVER_PORT}`);
 
-        tauriDriver = spawn(findBinary("tauri-driver"), [], {
-            stdio: [null, process.stdout, process.stderr],
-        });
-        tauriDriver.on("error", error => {
-            console.error("tauri-driver error:", error);
+        tauriDriverA = spawn(
+            findBinary("tauri-driver"),
+            [
+                "--port",
+                String(TAURI_DRIVER_PORT_A),
+                "--native-port",
+                String(TAURI_DRIVER_NATIVE_PORT_A),
+            ],
+            {stdio: [null, process.stdout, process.stderr]},
+        );
+        tauriDriverA.on("error", error => {
+            console.error("tauri-driver A error:", error);
             process.exit(1);
         });
-        tauriDriver.on("exit", code => {
+        tauriDriverA.on("exit", code => {
             if (!exit) {
-                console.error("tauri-driver exited with code:", code);
+                console.error("tauri-driver A exited with code:", code);
             }
         });
 
-        await waitForPort(4444, 10_000);
-        console.log("tauri-driver listening on port 4444");
+        tauriDriverB = spawn(
+            findBinary("tauri-driver"),
+            [
+                "--port",
+                String(TAURI_DRIVER_PORT_B),
+                "--native-port",
+                String(TAURI_DRIVER_NATIVE_PORT_B),
+            ],
+            {stdio: [null, process.stdout, process.stderr]},
+        );
+        tauriDriverB.on("error", error => {
+            console.error("tauri-driver B error:", error);
+            process.exit(1);
+        });
+        tauriDriverB.on("exit", code => {
+            if (!exit) {
+                console.error("tauri-driver B exited with code:", code);
+            }
+        });
+
+        await Promise.all([
+            waitForPort(TAURI_DRIVER_PORT_A, 10_000),
+            waitForPort(TAURI_DRIVER_PORT_B, 10_000),
+        ]);
+        console.log(
+            `tauri-driver instances listening on ports ${TAURI_DRIVER_PORT_A} and ${TAURI_DRIVER_PORT_B}`,
+        );
     },
 
     afterSession() {
@@ -170,7 +217,8 @@ export const config: WebdriverIO.Config = {
 
 function cleanup() {
     exit = true;
-    tauriDriver?.kill();
+    tauriDriverA?.kill();
+    tauriDriverB?.kill();
     vacsServer?.kill();
     mockVatsimServer?.kill();
 }
@@ -213,10 +261,20 @@ async function waitForPort(port: number, timeoutMs: number): Promise<void> {
 }
 
 function findBinary(name: string): string {
-    const cmd = isWindows ? "where" : "which";
+    const cmd = IS_WINDOWS ? "where" : "which";
     try {
         return execFileSync(cmd, [name], {encoding: "utf-8"}).trim().split("\n")[0];
     } catch {
         throw new Error(`Binary "${name}" not found on PATH.`);
+    }
+}
+
+declare global {
+    namespace WebdriverIO {
+        interface Capabilities {
+            "tauri:options": {
+                application: string;
+            };
+        }
     }
 }
