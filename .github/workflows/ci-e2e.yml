@@ -20,18 +20,6 @@ jobs:
       matrix:
         platform: [ubuntu-22.04, windows-latest]
 
-    # Service containers are only supported on Linux runners and silently ignored on Windows
-    services:
-      valkey:
-        image: valkey/valkey:9-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "valkey-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -42,9 +30,21 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: vacs-project/vacs-data
-          path: ../vacs-data
+          path: vacs-data
           sparse-checkout: dataset
           persist-credentials: false
+
+      - name: Start Valkey (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          docker run -d --name valkey -p 6379:6379 \
+            --health-cmd "valkey-cli ping" \
+            --health-interval 2s \
+            --health-timeout 5s \
+            --health-retries 5 \
+            valkey/valkey:9-alpine
+          until [ "$(docker inspect --format='{{.State.Health.Status}}' valkey)" = "healthy" ]; do sleep 1; done
+        working-directory: .
 
       - name: Install system dependencies (Linux)
         if: matrix.platform == 'ubuntu-22.04'
@@ -110,10 +110,14 @@ jobs:
       - name: E2E tests (Linux)
         if: matrix.platform == 'ubuntu-22.04'
         run: xvfb-run npm test -w e2e
+        env:
+          VACS_DATA_DIR: ${{ github.workspace }}/vacs-data
 
       - name: E2E tests (Windows)
         if: matrix.platform == 'windows-latest'
         run: npm test -w e2e
+        env:
+          VACS_DATA_DIR: ${{ github.workspace }}/vacs-data
 
       - name: Summary
         shell: bash
