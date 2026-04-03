@@ -6,6 +6,7 @@ import {fileURLToPath} from "url";
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const VACS_ROOT = path.resolve(__dirname, "..", "..");
 const VACS_CLIENT_ROOT = path.resolve(VACS_ROOT, "vacs-client");
+const VACS_DATA_DIR = process.env.VACS_DATA_DIR || path.resolve(VACS_ROOT, "..", "vacs-data");
 
 const isWindows = process.platform === "win32";
 const binaryExt = isWindows ? ".exe" : "";
@@ -118,6 +119,7 @@ export const config: WebdriverIO.Config = {
                 "VACS-SESSION-SIGNING_KEY":
                     "e2e-test-signing-key-at-least-64-chars-long-for-hmac-sha256-aaaa-bbbb-cccc-dddd-eeee-ffff-0000",
                 "VACS-SESSION-SECURE": "false",
+                "VACS-VATSIM-COVERAGE_DIR": path.resolve(VACS_DATA_DIR, "dataset"),
                 "VACS-SERVER-BIND_ADDR": `127.0.0.1:${VACS_SERVER_PORT}`,
             },
         });
