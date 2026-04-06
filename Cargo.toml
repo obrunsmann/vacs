@@ -23,7 +23,6 @@ publish = false
 anyhow = "1.0.102"
 ashpd = { version = "0.13.9", features = ["global_shortcuts", "raw_handle", "wayland"] }
 async-trait = "0.1.89"
-audioadapter-buffers = "2.0.0"
 axum = "0.8.8"
 axum-client-ip = "1.3.1"
 # Required to update tower-session to v0.15.0 until https://github.com/maxcountryman/axum-login/pull/315 is finally merged
@@ -66,7 +65,7 @@ regex = "1.12.3"
 reqwest = { version = "0.13.2", features = ["cookies", "json", "query", "rustls"] }
 rfd = { version = "0.17.2", features = ["common-controls-v6"] }
 ringbuf = "0.4.8"
-rubato = "1.0.1"
+rubato = "2.0.0"
 rustls = { version = "0.23.37", features = ["aws-lc-rs"] }
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
