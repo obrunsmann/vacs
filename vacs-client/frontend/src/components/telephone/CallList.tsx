@@ -7,6 +7,10 @@ import List from "../ui/List.tsx";
 import {useAsyncDebounce} from "../../hooks/debounce-hook.ts";
 import {invokeSafe} from "../../error.ts";
 import {useConnectionStore} from "../../stores/connection-store.ts";
+import incoming from "../../assets/call-list/incoming.svg";
+import incomingX from "../../assets/call-list/incoming-x.svg";
+import outgoing from "../../assets/call-list/outgoing.svg";
+import outgoingX from "../../assets/call-list/outgoing-x.svg";
 
 function CallList() {
     const calls = useCallListArray();
@@ -39,7 +43,7 @@ function CallList() {
                 itemsCount={calls.length}
                 selectedItem={selectedCall}
                 setSelectedItem={setSelectedCall}
-                defaultRows={11}
+                defaultRows={10}
                 row={callRow}
                 header={[{title: "Name", className: "col-span-2"}, {title: "Number"}]}
                 columnWidths={["minmax(3.5rem,auto)", "1fr", "1fr"]}
@@ -91,11 +95,16 @@ function CallRow(props: CallRowProps) {
     return (
         <>
             <div
-                className={clsx("p-0.5 text-center flex flex-col justify-between leading-4", color)}
+                className={clsx(
+                    "p-0.5 text-center flex flex-col justify-between items-center h-0 min-h-full",
+                    color,
+                )}
                 onClick={props.onClick}
             >
-                <p>{props.call?.type ?? ""}</p>
-                <p className="tracking-wider font-semibold">{props.call?.time ?? ""}</p>
+                <CallRowStatus call={props.call} />
+                <p className="tracking-wider font-semibold leading-3.5 pb-px">
+                    {props.call?.time ?? ""}
+                </p>
             </div>
             <div
                 className={clsx("px-0.5 flex items-center font-semibold", color)}
@@ -110,6 +119,23 @@ function CallRow(props: CallRowProps) {
                 {props.call?.clientId ?? ""}
             </div>
         </>
+    );
+}
+
+function CallRowStatus({call}: {call: CallListItem | undefined}) {
+    if (call === undefined) return <></>;
+
+    const status =
+        call.type === "IN"
+            ? call.answered !== false
+                ? [incoming, "IN", "Incoming"]
+                : [incomingX, "IN X", "Incoming - Unanswered"]
+            : call.answered !== false
+              ? [outgoing, "OUT", "Outgoing"]
+              : [outgoingX, "OUT X", "Outgoing - Unanswered"];
+
+    return (
+        <img src={status[0]} alt={status[1]} title={status[2]} className="flex-1 max-h-6 min-h-4" />
     );
 }
 

@@ -10,6 +10,7 @@ export type CallListItem = {
     name: string;
     target: CallTarget;
     clientId?: ClientId;
+    answered: boolean | undefined;
 };
 
 export type IncomingCallListEntry = {
@@ -23,8 +24,8 @@ export type OutgoingCallListEntry = {
 };
 
 export type CallListUpdate = {
-    callId: CallId;
-    clientId?: ClientId;
+    clientId?: ClientId | null;
+    answered?: boolean | null;
 };
 
 type CallListState = {
@@ -32,12 +33,13 @@ type CallListState = {
     actions: {
         addIncomingCall: (entry: IncomingCallListEntry) => void;
         addOutgoingCall: (entry: OutgoingCallListEntry) => void;
-        updateCall: (update: CallListUpdate) => void;
+        updateCall: (
+            callId: CallId,
+            update: CallListUpdate | ((state: CallListItem) => CallListUpdate),
+        ) => void;
         clearCallList: () => void;
     };
 };
-
-// TODO: Should we store source and target?
 
 export const useCallListStore = create<CallListState>()((set, get) => ({
     callList: new Map(),
@@ -55,6 +57,7 @@ export const useCallListStore = create<CallListState>()((set, get) => ({
                 ),
                 target: callSourceToTarget(entry.source),
                 clientId: entry.source.clientId,
+                answered: undefined,
             });
 
             set({callList});
@@ -71,18 +74,31 @@ export const useCallListStore = create<CallListState>()((set, get) => ({
                     entry.target.client,
                 ),
                 target: entry.target,
-                clientId: undefined,
+                clientId: entry.target.client,
+                answered: undefined,
             });
 
             set({callList});
         },
-        updateCall: (update: CallListUpdate) => {
+        updateCall: (callId, update) => {
             const callList = new Map(get().callList);
-            const item = callList.get(update.callId);
+            let item = callList.get(callId);
 
             if (item === undefined) return;
 
-            callList.set(update.callId, {...item, clientId: update.clientId});
+            if (typeof update === "function") {
+                update = update(item);
+            }
+
+            if (update.clientId !== undefined) {
+                item.clientId = update.clientId ?? undefined;
+            }
+
+            if (update.answered !== undefined) {
+                item.answered = update.answered ?? undefined;
+            }
+
+            callList.set(callId, item);
             set({callList});
         },
         clearCallList: () => {
@@ -104,7 +120,7 @@ export const useCallListArray = () =>
 
 export const useLastDialledClientId = () =>
     useCallListStore(state => {
-        const calls = state.callList.values();
+        const calls = Array.from(state.callList.values()).reverse();
 
         for (const call of calls) {
             if (call.type === "OUT") {
