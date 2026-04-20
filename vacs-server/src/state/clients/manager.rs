@@ -47,6 +47,10 @@ struct ClientPositionSync {
     disconnected_clients: Vec<(ClientId, DisconnectReason)>,
     /// Session info messages to send to clients whose position changed.
     session_info_updates: Vec<(ClientSession, server::SessionInfo)>,
+    /// Clients whose position changed and need a full station list resend.
+    /// Stores the resolved profile and position so `list_stations` can be called
+    /// after all locks are released.
+    station_list_updates: Vec<(ClientSession, ActiveProfile<ProfileId>, Option<PositionId>)>,
     /// Client info updates to broadcast to all clients.
     client_info_updates: Vec<ServerMessage>,
     /// Clients that joined an already-online position and need self-handoff events.
@@ -823,6 +827,19 @@ impl ClientManager {
             }
         }
 
+        // Phase 6: Send all station lists (computed here, after locks are released,
+        // because list_stations reads online_positions which was write-locked above)
+        for (session, profile, position_id) in sync.station_list_updates {
+            let stations = self.list_stations(&profile, position_id.as_ref()).await;
+            if let Err(err) = session.send_message(server::StationList { stations }).await {
+                tracing::warn!(
+                    ?err,
+                    client_id = ?session.id(),
+                    "Failed to send updated station list to client"
+                );
+            }
+        }
+
         for (session, changes) in per_client_changes {
             if let Err(err) = session
                 .send_message(server::StationChanges { changes })
@@ -865,6 +882,7 @@ impl ClientManager {
         let mut result = ClientPositionSync {
             disconnected_clients: Vec::new(),
             session_info_updates: Vec::new(),
+            station_list_updates: Vec::new(),
             client_info_updates: Vec::new(),
             self_handoff_clients: Vec::new(),
             departure_handoff_clients: Vec::new(),
@@ -964,12 +982,27 @@ impl ClientManager {
                             .unwrap_or((None, Vec::new()));
 
                         if old_position_id != new_position_id {
-                            tracing::debug!(
-                                ?cid,
-                                ?new_position_id,
-                                ?old_position_id,
-                                "Client position changed"
-                            );
+                            // During the grace period after connecting, ignore
+                            // position changes from the datafeed. The slurper
+                            // resolves the correct position immediately, but the
+                            // datafeed may still report a stale frequency for a
+                            // few update cycles.
+                            if session.is_within_position_grace_period() {
+                                tracing::debug!(
+                                    ?cid,
+                                    ?old_position_id,
+                                    ?new_position_id,
+                                    "Ignoring position change during grace period"
+                                );
+                                continue;
+                            } else {
+                                tracing::debug!(
+                                    ?cid,
+                                    ?new_position_id,
+                                    ?old_position_id,
+                                    "Client position changed"
+                                );
+                            }
 
                             session.set_position_id(new_position_id.clone());
 
@@ -1031,6 +1064,20 @@ impl ClientManager {
                                     &network,
                                 )
                             };
+
+                            // When a client changes position (and thus profile), they need the full
+                            // list of online stations relevant to their position, otherwise some
+                            // frontend state (own stations) might be inconsistent and only change
+                            // after positions go on/offline.
+                            if let SessionProfile::Changed(ActiveProfile::Specific(profile)) =
+                                &session_profile
+                            {
+                                result.station_list_updates.push((
+                                    session.clone(),
+                                    ActiveProfile::Specific(profile.id.clone()),
+                                    new_position_id.clone(),
+                                ));
+                            }
 
                             result.session_info_updates.push((
                                 session.clone(),
@@ -1373,6 +1420,13 @@ impl ClientManager {
             );
         }
     }
+
+    #[cfg(test)]
+    pub async fn expire_position_grace_period(&self, client_id: &ClientId) {
+        if let Some(session) = self.clients.write().await.get_mut(client_id) {
+            session.expire_position_grace_period();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1402,7 +1456,7 @@ pub struct StationCoverage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
+    use pretty_assertions::{assert_eq, assert_matches};
     use vacs_vatsim::coverage::test_support::TestFirBuilder;
 
     fn pos(id: &str) -> PositionId {
@@ -1460,17 +1514,21 @@ mod tests {
     struct DrainedMessages {
         station_changes: Vec<StationChange>,
         session_infos: Vec<server::SessionInfo>,
+        station_lists: Vec<server::StationList>,
     }
 
     /// Drain all pending messages from a client receiver, collecting station
-    /// changes (sorted for deterministic comparison) and session info updates.
+    /// changes (sorted for deterministic comparison), session info updates,
+    /// and station list messages.
     fn drain_messages(rx: &mut mpsc::Receiver<ServerMessage>) -> DrainedMessages {
         let mut station_changes = Vec::new();
         let mut session_infos = Vec::new();
+        let mut station_lists = Vec::new();
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 ServerMessage::StationChanges(sc) => station_changes.extend(sc.changes),
                 ServerMessage::SessionInfo(si) => session_infos.push(si),
+                ServerMessage::StationList(sl) => station_lists.push(sl),
                 _ => {}
             }
         }
@@ -1478,6 +1536,7 @@ mod tests {
         DrainedMessages {
             station_changes,
             session_infos,
+            station_lists,
         }
     }
 
@@ -3554,6 +3613,304 @@ controlled_by = ["LOWW_DEL"]
         );
     }
 
+    /// Issue #764: Client connects before the VATSIM datafeed has their correct
+    /// frequency. They start with no position and get an empty station list. On
+    /// the next sync cycle their position is discovered. They must receive both
+    /// a SessionInfo (with the profile) and a StationList (with all online
+    /// stations relevant to their profile).
+    #[tokio::test]
+    async fn sync_sends_station_list_when_position_discovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let network = create_lovv_network_with_profiles(dir.path());
+        let manager = client_manager(network);
+
+        // Another vacs client is already online as LOWW_TWR, making its stations
+        // visible.
+        let (_client_twr, _rx_twr) = manager
+            .add_client(
+                client_info("twr_client", "LOWW_TWR", "119.400"),
+                ActiveProfile::Custom,
+                ClientConnectionGuard::default(),
+            )
+            .await
+            .unwrap();
+
+        // Client connects before datafeed has their frequency. No position
+        // matched, so they start with ActiveProfile::None.
+        let (_client, mut rx) = manager
+            .add_client(
+                client_info_without_position("client0"),
+                ActiveProfile::None,
+                ClientConnectionGuard::default(),
+            )
+            .await
+            .unwrap();
+
+        // Drain any initial messages (ClientConnected, etc.)
+        drain_messages(&mut rx);
+
+        // Expire grace period so the sync can update the position.
+        manager.expire_position_grace_period(&cid("client0")).await;
+
+        // Datafeed now has the client's correct frequency for LOWW_APP.
+        let controllers = HashMap::from([
+            (
+                cid("twr_client"),
+                controller("twr_client", "LOWW_TWR", "119.400", FacilityType::Tower),
+            ),
+            (
+                cid("client0"),
+                controller("client0", "LOWW_APP", "134.675", FacilityType::Approach),
+            ),
+        ]);
+        let disconnected = manager
+            .sync_vatsim_state(&controllers, &mut HashSet::new(), false)
+            .await;
+        assert!(disconnected.is_empty());
+
+        let messages = drain_messages(&mut rx);
+
+        // Must receive a SessionInfo with the profile change
+        assert_eq!(
+            messages.session_infos.len(),
+            1,
+            "Client should receive exactly one SessionInfo"
+        );
+        assert_matches!(
+            &messages.session_infos[0].profile,
+            SessionProfile::Changed(ActiveProfile::Specific(_)),
+            "SessionInfo should contain a Changed Specific profile"
+        );
+
+        // Must also receive a StationList with the currently online stations
+        assert_eq!(
+            messages.station_lists.len(),
+            1,
+            "Client should receive exactly one StationList"
+        );
+        let station_ids: Vec<&str> = messages.station_lists[0]
+            .stations
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert!(
+            !station_ids.is_empty(),
+            "StationList should contain online stations"
+        );
+    }
+
+    /// When a client changes from one position (with profile) to another, they
+    /// should receive an updated StationList for their new profile's relevant
+    /// stations.
+    #[tokio::test]
+    async fn sync_sends_station_list_on_position_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let network = create_lovv_network_with_profiles(dir.path());
+        let manager = client_manager(network);
+
+        // LOWW_TWR is online (not vacs-only, needed for station visibility)
+        let (_client_twr, _rx_twr) = manager
+            .add_client(
+                client_info("twr_client", "LOWW_TWR", "119.400"),
+                ActiveProfile::Custom,
+                ClientConnectionGuard::default(),
+            )
+            .await
+            .unwrap();
+
+        // Client connects without a position (datafeed hasn't updated yet).
+        // The first sync discovers LOVV_CTR, the second changes to LOWW_APP.
+        let (_client, mut rx) = manager
+            .add_client(
+                client_info_without_position("client0"),
+                ActiveProfile::None,
+                ClientConnectionGuard::default(),
+            )
+            .await
+            .unwrap();
+        drain_messages(&mut rx);
+
+        // Expire grace period so syncs can update the position.
+        manager.expire_position_grace_period(&cid("client0")).await;
+
+        // First sync: datafeed now has client as LOVV_CTR. Position changes
+        // from None to LOVV_CTR, profile from None to CTR_PROFILE.
+        let controllers = HashMap::from([
+            (
+                cid("twr_client"),
+                controller("twr_client", "LOWW_TWR", "119.400", FacilityType::Tower),
+            ),
+            (
+                cid("client0"),
+                controller("client0", "LOVV_CTR", "132.600", FacilityType::Enroute),
+            ),
+        ]);
+        manager
+            .sync_vatsim_state(&controllers, &mut HashSet::new(), false)
+            .await;
+        let messages = drain_messages(&mut rx);
+        // Profile changed from None to Specific(CTR_PROFILE)
+        assert_eq!(messages.session_infos.len(), 1);
+        assert_eq!(
+            messages.station_lists.len(),
+            1,
+            "Client should receive StationList on initial profile assignment"
+        );
+
+        // Now client changes to LOWW_APP (different profile)
+        let controllers2 = HashMap::from([
+            (
+                cid("twr_client"),
+                controller("twr_client", "LOWW_TWR", "119.400", FacilityType::Tower),
+            ),
+            (
+                cid("client0"),
+                controller("client0", "LOWW_APP", "134.675", FacilityType::Approach),
+            ),
+        ]);
+        manager
+            .sync_vatsim_state(&controllers2, &mut HashSet::new(), false)
+            .await;
+        let messages2 = drain_messages(&mut rx);
+
+        // Should get a new SessionInfo and a new StationList for the APP profile
+        assert_eq!(messages2.session_infos.len(), 1);
+        assert_eq!(
+            messages2.station_lists.len(),
+            1,
+            "Client should receive StationList on position change"
+        );
+    }
+
+    /// During the position grace period after connecting, the datafeed sync
+    /// should not change the client's position even if the datafeed reports a
+    /// different frequency.
+    #[tokio::test]
+    async fn sync_ignores_position_change_during_grace_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let network = create_lovv_network_with_profiles(dir.path());
+        let manager = client_manager(network);
+
+        // Client connects as LOWW_APP via the slurper.
+        let (_client, mut rx) = manager
+            .add_client(
+                client_info("client0", "LOWW_APP", "134.675"),
+                ActiveProfile::Custom,
+                ClientConnectionGuard::default(),
+            )
+            .await
+            .unwrap();
+        drain_messages(&mut rx);
+
+        // Datafeed still has the old frequency (maps to LOVV_CTR), but grace
+        // period should prevent the position from changing.
+        let controllers = HashMap::from([(
+            cid("client0"),
+            controller("client0", "LOVV_CTR", "132.600", FacilityType::Enroute),
+        )]);
+        manager
+            .sync_vatsim_state(&controllers, &mut HashSet::new(), false)
+            .await;
+
+        let messages = drain_messages(&mut rx);
+        assert!(
+            messages.session_infos.is_empty(),
+            "No SessionInfo should be sent during grace period"
+        );
+        assert!(
+            messages.station_lists.is_empty(),
+            "No StationList should be sent during grace period"
+        );
+
+        // Position should still be LOWW_APP.
+        let client = manager.get_client(&cid("client0")).await.unwrap();
+        assert_eq!(
+            client.position_id(),
+            Some(&pos("LOWW_APP")),
+            "Position should remain LOWW_APP during grace period"
+        );
+    }
+
+    /// After the grace period expires, the datafeed sync should apply position
+    /// changes normally.
+    #[tokio::test]
+    async fn sync_applies_position_change_after_grace_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let network = create_lovv_network_with_profiles(dir.path());
+        let manager = client_manager(network);
+
+        let (_client, mut rx) = manager
+            .add_client(
+                client_info("client0", "LOWW_APP", "134.675"),
+                ActiveProfile::Custom,
+                ClientConnectionGuard::default(),
+            )
+            .await
+            .unwrap();
+        drain_messages(&mut rx);
+
+        manager.expire_position_grace_period(&cid("client0")).await;
+
+        let controllers = HashMap::from([(
+            cid("client0"),
+            controller("client0", "LOVV_CTR", "132.600", FacilityType::Enroute),
+        )]);
+        manager
+            .sync_vatsim_state(&controllers, &mut HashSet::new(), false)
+            .await;
+
+        let messages = drain_messages(&mut rx);
+        assert_eq!(
+            messages.session_infos.len(),
+            1,
+            "SessionInfo should be sent after grace period expires"
+        );
+
+        let client = manager.get_client(&cid("client0")).await.unwrap();
+        assert_eq!(
+            client.position_id(),
+            Some(&pos("LOVV_CTR")),
+            "Position should change to LOVV_CTR after grace period"
+        );
+    }
+
+    /// When a client's position doesn't change during a sync, no StationList
+    /// should be sent.
+    #[tokio::test]
+    async fn sync_no_station_list_when_position_unchanged() {
+        let (_dir, network) = create_lovv_network();
+        let manager = client_manager(network);
+
+        let (_client, mut rx) = manager
+            .add_client(
+                client_info("client0", "LOVV_CTR", "132.600"),
+                ActiveProfile::Custom,
+                ClientConnectionGuard::default(),
+            )
+            .await
+            .unwrap();
+        drain_messages(&mut rx);
+
+        // Sync where client info doesn't change (same callsign, frequency, etc.)
+        let controllers = HashMap::from([(
+            cid("client0"),
+            controller("client0", "LOVV_CTR", "132.600", FacilityType::Enroute),
+        )]);
+        manager
+            .sync_vatsim_state(&controllers, &mut HashSet::new(), false)
+            .await;
+
+        let messages = drain_messages(&mut rx);
+        assert!(
+            messages.station_lists.is_empty(),
+            "No StationList should be sent when position is unchanged"
+        );
+        assert!(
+            messages.session_infos.is_empty(),
+            "No SessionInfo should be sent when position is unchanged"
+        );
+    }
+
     /// Base builder for the standard LOVV FIR used by most tests.
     fn lovv_fir() -> TestFirBuilder {
         TestFirBuilder::new("LOVV")
@@ -3710,6 +4067,9 @@ controlled_by = ["LOWW_DEL"]
             .await
             .unwrap();
         drain_messages(&mut rx);
+
+        // Expire grace period so the sync can move client0 between positions.
+        manager.expire_position_grace_period(&cid("client0")).await;
 
         // First sync: establish LOWW_TWR as vatsim-only
         let controllers1 = HashMap::from([
@@ -3875,6 +4235,7 @@ controlled_by = ["LOWW_DEL"]
             Connect(ConnectStep),
             ConnectWithoutPosition(ConnectWithoutPositionStep),
             Disconnect(DisconnectStep),
+            ExpireGracePeriod(ExpireGracePeriodStep),
             Datafeed(DatafeedStep),
             DatafeedFile(String),
             DrainMessages(DrainMessagesStep),
@@ -3904,6 +4265,11 @@ controlled_by = ["LOWW_DEL"]
 
         #[derive(Debug, Deserialize)]
         pub struct DisconnectStep {
+            pub client_id: String,
+        }
+
+        #[derive(Debug, Deserialize)]
+        pub struct ExpireGracePeriodStep {
             pub client_id: String,
         }
 
@@ -4236,6 +4602,11 @@ controlled_by = ["LOWW_DEL"]
                             .remove_client(cid(&s.client_id), Some(DisconnectReason::Terminated))
                             .await;
                         ctx.receivers.remove(&s.client_id);
+                    }
+                    Step::ExpireGracePeriod(s) => {
+                        ctx.manager
+                            .expire_position_grace_period(&cid(&s.client_id))
+                            .await;
                     }
                     Step::Datafeed(s) => {
                         let controllers = controllers_from_vec(&s.controllers);
