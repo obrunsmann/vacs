@@ -8371,7 +8371,7 @@ dependencies = [
 
 [[package]]
 name = "vacs-client"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "anyhow",
  "ashpd",
