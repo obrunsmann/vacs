@@ -1,4 +1,5 @@
 mod admin;
+mod assets;
 mod auth;
 mod debug;
 mod root;
@@ -35,6 +36,7 @@ where
 {
     let mut app = Router::new()
         .nest("/admin", admin::routes())
+        .nest("/assets", assets::routes())
         .nest("/auth", auth::routes())
         .nest("/ws", ws::routes().merge(crate::ws::routes()))
         .nest("/version", version::routes())
@@ -59,12 +61,19 @@ where
                 let path = req.uri().path();
                 match path {
                     "/health" | "/favicon.ico" => Span::none(),
-                    _ => debug_span!(
-                        "request",
-                        method = %req.method(),
-                        uri = %req.uri(),
-                        version = ?req.version(),
-                        client_ip = tracing::field::Empty),
+                    _ => {
+                        let uri = if path == "/auth/vatsim/redirect" {
+                            path.to_owned()
+                        } else {
+                            req.uri().to_string()
+                        };
+                        debug_span!(
+                            "request",
+                            method = %req.method(),
+                            uri = uri.as_str(),
+                            version = ?req.version(),
+                            client_ip = tracing::field::Empty)
+                    }
                 }
             }),
         )

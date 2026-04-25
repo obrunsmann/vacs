@@ -8437,7 +8437,7 @@ dependencies = [
 
 [[package]]
 name = "vacs-server"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8482,6 +8482,7 @@ dependencies = [
  "tower-sessions-redis-store",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "vacs-protocol",
  "vacs-vatsim",

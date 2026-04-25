@@ -4,7 +4,8 @@ use anyhow::Context;
 use axum_login::{AuthUser, AuthnBackend, UserId};
 use oauth2::basic::BasicClient;
 use oauth2::{
-    AuthorizationCode, CsrfToken, EndpointNotSet, EndpointSet, HttpRequest, TokenResponse,
+    AuthorizationCode, CsrfToken, EndpointNotSet, EndpointSet, HttpRequest, PkceCodeChallenge,
+    PkceCodeVerifier, TokenResponse,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -28,16 +29,26 @@ impl AuthUser for User {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub enum Credentials {
     OAuthCode {
         code: String,
         stored_state: String,
         received_state: String,
+        pkce_verifier: String,
     },
     AccessToken {
         access_token: String,
     },
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OAuthCode { .. } => f.debug_struct("OAuthCode").finish_non_exhaustive(),
+            Self::AccessToken { .. } => f.debug_struct("AccessToken").finish_non_exhaustive(),
+        }
+    }
 }
 
 pub type VatsimOAuthClient =
@@ -65,12 +76,18 @@ impl Backend {
         })
     }
 
-    pub fn authorize_url(&self) -> (Url, CsrfToken) {
-        self.client.authorize_url(CsrfToken::new_random).url()
+    pub fn authorize_url(&self) -> (Url, CsrfToken, PkceCodeVerifier) {
+        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+        let (url, csrf_token) = self
+            .client
+            .authorize_url(CsrfToken::new_random)
+            .set_pkce_challenge(pkce_challenge)
+            .url();
+        (url, csrf_token, pkce_verifier)
     }
 
     async fn fetch_user_details(&self, access_token: &str) -> Result<User, AppError> {
-        tracing::trace!(?access_token, "Fetching user details");
+        tracing::trace!("Fetching user details");
         let response = self
             .http_client
             .get(self.vatsim_user_details_endpoint_url.clone())
@@ -110,6 +127,7 @@ impl AuthnBackend for Backend {
                 code,
                 stored_state,
                 received_state,
+                pkce_verifier,
             } => {
                 if stored_state != received_state {
                     tracing::debug!("CSRF token mismatch");
@@ -120,6 +138,7 @@ impl AuthnBackend for Backend {
                 let token = self
                     .client
                     .exchange_code(AuthorizationCode::new(code))
+                    .set_pkce_verifier(PkceCodeVerifier::new(pkce_verifier))
                     .request_async(&ReqwestClient(&self.http_client))
                     .await
                     .context("Failed to exchange code")
@@ -245,6 +264,7 @@ pub mod mock {
                     code,
                     stored_state,
                     received_state,
+                    pkce_verifier: _,
                 } => {
                     if stored_state != received_state {
                         return Ok(None);
