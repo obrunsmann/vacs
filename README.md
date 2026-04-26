@@ -18,7 +18,21 @@ We aim to modernize VATSIM controller-to-controller coordination by providing a 
 
 ## Installation
 
-As a controller, you merely need to download the latest version of the client for your platform from the [releases](https://github.com/vacs-project/vacs/releases/latest) page.
+As a controller, you can either install `vacs` via Homebrew on macOS or download the latest version from the [releases](https://github.com/vacs-project/vacs/releases/latest) page.
+
+### Homebrew (macOS)
+
+```bash
+brew tap vacs-project/tap
+brew install --cask vacs
+```
+
+> [!NOTE]
+> Our macOS releases are currently not code signed and are thus automatically flagged as "corrupted". In order to run the application, you may have to manually remove it from quarantine by running:
+>
+> ```bash
+> sudo xattr -rd com.apple.quarantine /Applications/vacs.app
+> ```
 
 Releases are provided for:
 
@@ -27,13 +41,6 @@ Releases are provided for:
 - Red Hat-based Linux distributions (`*.rpm`)
 - macOS Apple Silicon (`*aarch64.dmg`)
 - macOS Intel (`*x64.dmg`)
-
-> [!NOTE]  
-> Our macOS releases are currently not code signed and are thus automatically flagged as "corrupted". In order to run the application, you have to manually remove it from quarantine by running:
->
-> ```bash
-> sudo xattr -rd com.apple.quarantine /Applications/vacs.app
-> ```
 
 The client is self-contained and does not require any additional prerequisites or manual dependency installation.
 

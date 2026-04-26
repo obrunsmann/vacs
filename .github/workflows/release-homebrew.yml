@@ -1,0 +1,196 @@
+name: Release • homebrew tap
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Client release tag (1.2.3, v1.2.3, or vacs-client-v1.2.3)"
+        required: true
+        type: string
+      tap_repository:
+        description: "Target tap repository (owner/repo)"
+        required: false
+        default: "vacs-project/homebrew-tap"
+        type: string
+
+permissions: {}
+
+jobs:
+  update-tap:
+    if: ${{ github.event_name == 'workflow_dispatch' || (startsWith(github.event.release.tag_name, 'vacs-client-v') && !github.event.release.prerelease) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      version: ${{ steps.vars.outputs.version }}
+      tap_repository: ${{ steps.vars.outputs.tap_repository }}
+      tap_owner: ${{ steps.vars.outputs.tap_owner }}
+      tap_name: ${{ steps.vars.outputs.tap_name }}
+      arm_sha: ${{ steps.release.outputs.arm_sha }}
+      intel_sha: ${{ steps.release.outputs.intel_sha }}
+
+    steps:
+      - name: Resolve version, tag and tap repository
+        id: vars
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TAP_REPOSITORY: ${{ inputs.tap_repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            raw="${INPUT_TAG}"
+            tap_repo="${INPUT_TAP_REPOSITORY:-vacs-project/homebrew-tap}"
+          else
+            raw="${RELEASE_TAG}"
+            tap_repo="vacs-project/homebrew-tap"
+          fi
+
+          if [[ "$raw" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?) ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            echo "Could not parse semver from: $raw" >&2
+            exit 1
+          fi
+
+          tag="vacs-client-v${version}"
+
+          if [[ ! "$tap_repo" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "Invalid tap repository: $tap_repo (expected owner/repo)" >&2
+            exit 1
+          fi
+
+          tap_owner="${tap_repo%%/*}"
+          tap_name="${tap_repo##*/}"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tap_repository=$tap_repo" >> "$GITHUB_OUTPUT"
+          echo "tap_owner=$tap_owner" >> "$GITHUB_OUTPUT"
+          echo "tap_name=$tap_name" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release checksums
+        id: release
+        shell: bash
+        env:
+          TAG: ${{ steps.vars.outputs.tag }}
+          VERSION: ${{ steps.vars.outputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/vacs-project/vacs/releases/tags/${TAG}")"
+          arm_name="vacs_${VERSION}_aarch64.dmg"
+          intel_name="vacs_${VERSION}_x64.dmg"
+
+          arm_sha="$(jq -r --arg n "$arm_name" '.assets[] | select(.name == $n) | .digest // ""' <<<"$release_json" | sed -E 's/^sha256://')"
+          intel_sha="$(jq -r --arg n "$intel_name" '.assets[] | select(.name == $n) | .digest // ""' <<<"$release_json" | sed -E 's/^sha256://')"
+
+          if [[ -z "$arm_sha" || -z "$intel_sha" ]]; then
+            sums_url="https://github.com/vacs-project/vacs/releases/download/${TAG}/SHA256SUMS-${VERSION}.txt"
+            sums_txt="$(curl -fsSL "$sums_url")"
+            [[ -n "$arm_sha" ]] || arm_sha="$(awk -v f="$arm_name" '$2 == f { print $1 }' <<<"$sums_txt")"
+            [[ -n "$intel_sha" ]] || intel_sha="$(awk -v f="$intel_name" '$2 == f { print $1 }' <<<"$sums_txt")"
+          fi
+
+          if [[ -z "$arm_sha" || -z "$intel_sha" ]]; then
+            echo "Could not resolve checksums for ${TAG}" >&2
+            exit 1
+          fi
+
+          echo "arm_sha=$arm_sha" >> "$GITHUB_OUTPUT"
+          echo "intel_sha=$intel_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub token for tap repository
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        id: generate-token
+        with:
+          client-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ steps.vars.outputs.tap_owner }}
+          repositories: ${{ steps.vars.outputs.tap_name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Checkout tap repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ steps.vars.outputs.tap_repository }}
+          token: ${{ steps.generate-token.outputs.token }}
+          path: tap
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Update cask
+        shell: bash
+        env:
+          VERSION: ${{ steps.vars.outputs.version }}
+          ARM_SHA: ${{ steps.release.outputs.arm_sha }}
+          INTEL_SHA: ${{ steps.release.outputs.intel_sha }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p tap/Casks
+          cat > tap/Casks/vacs.rb <<RUBY
+          cask "vacs" do
+            arch arm: "aarch64", intel: "x64"
+
+            version "${VERSION}"
+            sha256 arm: "${ARM_SHA}",
+                   intel: "${INTEL_SHA}"
+
+            url "https://github.com/vacs-project/vacs/releases/download/vacs-client-v#{version}/vacs_#{version}_#{arch}.dmg",
+                verified: "github.com/vacs-project/vacs/"
+            name "vacs"
+            desc "Ground-to-ground voice communication system for VATSIM controllers"
+            homepage "https://vacs.network"
+
+            livecheck do
+              url :url
+              regex(/^vacs-client-v?(\d+(?:\.\d+)+)$/i)
+              strategy :github_latest
+            end
+
+            app "vacs.app"
+
+            auto_updates true
+
+            caveats do
+              <<~EOS
+                vacs is currently not notarized. On first launch, macOS may block the app.
+                If needed, remove quarantine attributes manually:
+
+                  sudo xattr -rd com.apple.quarantine /Applications/vacs.app
+              EOS
+            end
+          end
+          RUBY
+
+      - name: Validate Cask syntax
+        run: ruby -c tap/Casks/vacs.rb
+
+      - name: Create pull request in tap repository
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.generate-token.outputs.token }}
+          path: tap
+          commit-message: "chore(cask): bump vacs to v${{ steps.vars.outputs.version }}"
+          branch: "automation/update-vacs-${{ steps.vars.outputs.version }}"
+          delete-branch: true
+          title: "chore(cask): bump vacs to v${{ steps.vars.outputs.version }}"
+          body: |
+            Automated update from `vacs-project/vacs` release `${{ steps.vars.outputs.tag }}`.
+
+            - version: `${{ steps.vars.outputs.version }}`
+            - arm64 sha256: `${{ steps.release.outputs.arm_sha }}`
+            - x64 sha256: `${{ steps.release.outputs.intel_sha }}`
